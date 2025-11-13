@@ -1,0 +1,292 @@
+[
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761322500000,
+    "EntryPrice": 109977,
+    "ExitTime": 1761336900000,
+    "ExitPrice": 110597.9,
+    "Size": 0.08726410002848964,
+    "Return": 0.0004912836666133725
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761336900000,
+    "EntryPrice": 110597.9,
+    "ExitTime": 1761451200000,
+    "ExitPrice": 111214.9,
+    "Size": 0.09045411124318714,
+    "Return": -0.000503220107949701
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761451200000,
+    "EntryPrice": 111214.9,
+    "ExitTime": 1761457500000,
+    "ExitPrice": 111574.3,
+    "Size": 0.3642774493622212,
+    "Return": 0.0011752942141649994
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761457500000,
+    "EntryPrice": 111574.3,
+    "ExitTime": 1761597900000,
+    "ExitPrice": 114611.8,
+    "Size": 0.14167783986923238,
+    "Return": -0.0038054709062900227
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761597900000,
+    "EntryPrice": 114611.8,
+    "ExitTime": 1761649200000,
+    "ExitPrice": 114535.5,
+    "Size": 0.18468657421909285,
+    "Return": -0.00012299150924931834
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761649200000,
+    "EntryPrice": 114535.5,
+    "ExitTime": 1761656400000,
+    "ExitPrice": 114395.4,
+    "Size": 0.009118414166100805,
+    "Return": 0.000011160485405420174
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761656400000,
+    "EntryPrice": 114395.4,
+    "ExitTime": 1761662700000,
+    "ExitPrice": 114724.6,
+    "Size": 0.07545029472360483,
+    "Return": 0.00021681436902097823
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761662700000,
+    "EntryPrice": 114724.6,
+    "ExitTime": 1761682500000,
+    "ExitPrice": 112867.1,
+    "Size": 0.24210774126617288,
+    "Return": 0.003952034411619038
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761682500000,
+    "EntryPrice": 112867.1,
+    "ExitTime": 1761744600000,
+    "ExitPrice": 113488.5,
+    "Size": 0.17806964835613612,
+    "Return": 0.0009776895951416592
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761744600000,
+    "EntryPrice": 113488.5,
+    "ExitTime": 1761750900000,
+    "ExitPrice": 112222,
+    "Size": 0.1033407573877709,
+    "Return": 0.0011597372994556633
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761750900000,
+    "EntryPrice": 112222,
+    "ExitTime": 1761801300000,
+    "ExitPrice": 108956.8,
+    "Size": 0.12416471458935663,
+    "Return": -0.003666283407228237
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761801300000,
+    "EntryPrice": 108956.8,
+    "ExitTime": 1761815700000,
+    "ExitPrice": 110353.4,
+    "Size": 0.005898613882784078,
+    "Return": -0.00007512751810794365
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761815700000,
+    "EntryPrice": 110353.4,
+    "ExitTime": 1761835500000,
+    "ExitPrice": 108250.9,
+    "Size": 0.0796225645998415,
+    "Return": -0.0015316405414654462
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761835500000,
+    "EntryPrice": 108250.9,
+    "ExitTime": 1761866100000,
+    "ExitPrice": 107607.9,
+    "Size": 0.06804313844425063,
+    "Return": 0.0004053748786425134
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761866100000,
+    "EntryPrice": 107607.9,
+    "ExitTime": 1761876000000,
+    "ExitPrice": 109574,
+    "Size": 0.011251062844777877,
+    "Return": 0.00020371236253004485
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761876000000,
+    "EntryPrice": 109574,
+    "ExitTime": 1761882300000,
+    "ExitPrice": 108817.9,
+    "Size": 0.15421576354217764,
+    "Return": 0.0010678326869775145
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761882300000,
+    "EntryPrice": 108817.9,
+    "ExitTime": 1761888600000,
+    "ExitPrice": 109823.3,
+    "Size": 0.02074261656320067,
+    "Return": 0.00019076709867052772
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761888600000,
+    "EntryPrice": 109823.3,
+    "ExitTime": 1761935400000,
+    "ExitPrice": 109188.2,
+    "Size": 0.12557335288835939,
+    "Return": 0.0007282892447882239
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1761935400000,
+    "EntryPrice": 109188.2,
+    "ExitTime": 1761951600000,
+    "ExitPrice": 109531,
+    "Size": 0.12970362860236548,
+    "Return": 0.0004065709850026239
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1761951600000,
+    "EntryPrice": 109531,
+    "ExitTime": 1762006500000,
+    "ExitPrice": 109687.6,
+    "Size": 0.2512583792590252,
+    "Return": -0.000358975642440477
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1762006500000,
+    "EntryPrice": 109687.6,
+    "ExitTime": 1762013700000,
+    "ExitPrice": 110136.6,
+    "Size": 0.19622595369409668,
+    "Return": 0.0008016003309329393
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1762013700000,
+    "EntryPrice": 110136.6,
+    "ExitTime": 1762040700000,
+    "ExitPrice": 110000.1,
+    "Size": 0.1646830516091286,
+    "Return": 0.00020422982106691042
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1762040700000,
+    "EntryPrice": 110000.1,
+    "ExitTime": 1762060500000,
+    "ExitPrice": 110463.9,
+    "Size": 0.2746010981441273,
+    "Return": 0.0011553829850428096
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1762060500000,
+    "EntryPrice": 110463.9,
+    "ExitTime": 1762094700000,
+    "ExitPrice": 110297.8,
+    "Size": 0.2703723013713596,
+    "Return": 0.0004068536139380753
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1762094700000,
+    "EntryPrice": 110297.8,
+    "ExitTime": 1762150500000,
+    "ExitPrice": 107309.6,
+    "Size": 0.1736044059127198,
+    "Return": -0.004768195357439172
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1762150500000,
+    "EntryPrice": 107309.6,
+    "ExitTime": 1762173000000,
+    "ExitPrice": 108189.9,
+    "Size": 0.026324881398499957,
+    "Return": -0.00021507170080638417
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "long",
+    "EntryTime": 1762173000000,
+    "EntryPrice": 108189.9,
+    "ExitTime": 1762206300000,
+    "ExitPrice": 106968.1,
+    "Size": 0.04873407808417948,
+    "Return": -0.0005534903339920049
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1762206300000,
+    "EntryPrice": 106968.1,
+    "ExitTime": 1762236000000,
+    "ExitPrice": 104171.9,
+    "Size": 0.1195570299283203,
+    "Return": 0.003166855293412826
+  },
+  {
+    "InstID": "BTC-USDT-SWAP",
+    "Dir": "short",
+    "EntryTime": 1762824600000,
+    "EntryPrice": 106750,
+    "ExitTime": 1762832700000,
+    "ExitPrice": 106373.5,
+    "Size": 0.26969699752872867,
+    "Return": 0.0009528843623506935
+  }
+]
