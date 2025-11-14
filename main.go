@@ -31,19 +31,70 @@ type BacktestConfig struct {
 	DataSource         string   `json:"data_source"`
 	DataPath           string   `json:"data_path"`
 	AutoFetchIfMissing bool     `json:"auto_fetch_if_missing"`
+	UseRisk            bool     `json:"use_risk"`
 	UsePortfolio       bool     `json:"use_portfolio"`
 	BarsLimit          int      `json:"bars_limit"`
 
-	StrategyRiskTarget     float64 `json:"strategy_risk_target"`
-	StrategyMaxAbsPosition float64 `json:"strategy_max_abs_position"`
-	StrategyMaxLeverage    float64 `json:"strategy_max_leverage"`
-	StrategyTrendGain      float64 `json:"strategy_trend_gain"`
-	StrategyMRGain         float64 `json:"strategy_mr_gain"`
-	StrategyBreakoutGain   float64 `json:"strategy_breakout_gain"`
-	FallbackScale          float64 `json:"fallback_scale"`
+	// Legacy flat strategy fields (kept for backward compatibility)
+	StrategyRiskTarget     float64 `json:"strategy_risk_target,omitempty"`
+	StrategyMaxAbsPosition float64 `json:"strategy_max_abs_position,omitempty"`
+	StrategyMaxLeverage    float64 `json:"strategy_max_leverage,omitempty"`
+	StrategyTrendGain      float64 `json:"strategy_trend_gain,omitempty"`
+	StrategyMRGain         float64 `json:"strategy_mr_gain,omitempty"`
+	StrategyBreakoutGain   float64 `json:"strategy_breakout_gain,omitempty"`
+	FallbackScale          float64 `json:"fallback_scale,omitempty"`
+
+	Strategy StrategyConfig `json:"strategy"`
+	Risk     RiskConfig     `json:"risk"`
 
 	DebugFallbackMA    bool `json:"debug_fallback_ma"`
 	DebugFallbackForce bool `json:"debug_fallback_force"`
+}
+
+// StrategyConfig captures tunable knobs for QuantMasterElite plus new regime controls.
+type StrategyConfig struct {
+	TrendGain    float64        `json:"trend_gain"`
+	MRGain       float64        `json:"mr_gain"`
+	BreakoutGain float64        `json:"breakout_gain"`
+	Regime       RegimeConfig   `json:"regime"`
+	MTF          MTFConfig      `json:"mtf"`
+	Fallback     FallbackConfig `json:"fallback"`
+}
+
+type RegimeConfig struct {
+	Enable         *bool   `json:"enable"`
+	TrendAdxPeriod int     `json:"trend_adx_period"`
+	TrendAdxTh     float64 `json:"trend_adx_th"`
+	RangeBwPeriod  int     `json:"range_bw_period"`
+	RangeBwTh      float64 `json:"range_bw_th"`
+}
+
+type MTFConfig struct {
+	ConfirmEnable *bool  `json:"confirm_enable"`
+	HigherTF      string `json:"higher_tf"`
+	TrendAlign    *bool  `json:"trend_align"`
+}
+
+type FallbackConfig struct {
+	Enable   *bool   `json:"enable"`
+	Scale    float64 `json:"scale"`
+	MAPeriod int     `json:"ma_period"`
+}
+
+type RiskConfig struct {
+	RiskTarget     float64         `json:"risk_target"`
+	ATRPeriod      int             `json:"atr_period"`
+	ATRStopK       float64         `json:"atr_stop_k"`
+	ATRTrailK      float64         `json:"atr_trail_k"`
+	MaxLeverage    float64         `json:"max_leverage"`
+	MaxAbsPosition float64         `json:"max_abs_position"`
+	DDCircuit      DDCircuitConfig `json:"dd_circuit"`
+}
+
+type DDCircuitConfig struct {
+	Enable       *bool   `json:"enable"`
+	Threshold    float64 `json:"threshold"`
+	CooldownBars int     `json:"cooldown_bars"`
 }
 
 func (c *BacktestConfig) normalize() {
@@ -70,6 +121,128 @@ func (c *BacktestConfig) normalize() {
 	}
 	if c.FallbackScale <= 0 {
 		c.FallbackScale = 1.0
+	}
+
+	c.Strategy.applyDefaults(c)
+	c.Risk.applyDefaults(c)
+}
+
+func (s *StrategyConfig) applyDefaults(cfg *BacktestConfig) {
+	if s.TrendGain <= 0 {
+		if cfg.StrategyTrendGain > 0 {
+			s.TrendGain = cfg.StrategyTrendGain
+		} else {
+			s.TrendGain = 2.0
+		}
+	}
+	if s.MRGain <= 0 {
+		if cfg.StrategyMRGain > 0 {
+			s.MRGain = cfg.StrategyMRGain
+		} else {
+			s.MRGain = 0.7
+		}
+	}
+	if s.BreakoutGain <= 0 {
+		if cfg.StrategyBreakoutGain > 0 {
+			s.BreakoutGain = cfg.StrategyBreakoutGain
+		} else {
+			s.BreakoutGain = 1.0
+		}
+	}
+	s.Regime.applyDefaults()
+	s.MTF.applyDefaults()
+	s.Fallback.applyDefaults(cfg.FallbackScale)
+}
+
+func (r *RiskConfig) applyDefaults(cfg *BacktestConfig) {
+	if r.RiskTarget <= 0 {
+		if cfg.StrategyRiskTarget > 0 {
+			r.RiskTarget = cfg.StrategyRiskTarget
+		} else {
+			r.RiskTarget = 0.6
+		}
+	}
+	if r.ATRPeriod <= 0 {
+		r.ATRPeriod = 14
+	}
+	if r.ATRStopK <= 0 {
+		r.ATRStopK = 2.5
+	}
+	if r.ATRTrailK <= 0 {
+		r.ATRTrailK = 3.0
+	}
+	if r.MaxAbsPosition <= 0 {
+		if cfg.StrategyMaxAbsPosition > 0 {
+			r.MaxAbsPosition = cfg.StrategyMaxAbsPosition
+		} else {
+			r.MaxAbsPosition = 1.5
+		}
+	}
+	if r.MaxLeverage <= 0 {
+		if cfg.StrategyMaxLeverage > 0 {
+			r.MaxLeverage = cfg.StrategyMaxLeverage
+		} else {
+			r.MaxLeverage = 2.0
+		}
+	}
+	r.DDCircuit.applyDefaults()
+}
+
+func (r *RegimeConfig) applyDefaults() {
+	if r.Enable == nil {
+		r.Enable = boolPtr(true)
+	}
+	if r.TrendAdxPeriod <= 0 {
+		r.TrendAdxPeriod = 14
+	}
+	if r.TrendAdxTh <= 0 {
+		r.TrendAdxTh = 20
+	}
+	if r.RangeBwPeriod <= 0 {
+		r.RangeBwPeriod = 20
+	}
+	if r.RangeBwTh <= 0 {
+		r.RangeBwTh = 0.05
+	}
+}
+
+func (m *MTFConfig) applyDefaults() {
+	if m.ConfirmEnable == nil {
+		m.ConfirmEnable = boolPtr(true)
+	}
+	if strings.TrimSpace(m.HigherTF) == "" {
+		m.HigherTF = "1h"
+	}
+	if m.TrendAlign == nil {
+		m.TrendAlign = boolPtr(true)
+	}
+}
+
+func (f *FallbackConfig) applyDefaults(legacyScale float64) {
+	if f.Enable == nil {
+		f.Enable = boolPtr(true)
+	}
+	if f.Scale <= 0 {
+		if legacyScale > 0 {
+			f.Scale = legacyScale
+		} else {
+			f.Scale = 0.25
+		}
+	}
+	if f.MAPeriod <= 0 {
+		f.MAPeriod = 100
+	}
+}
+
+func (d *DDCircuitConfig) applyDefaults() {
+	if d.Enable == nil {
+		d.Enable = boolPtr(true)
+	}
+	if d.Threshold <= 0 {
+		d.Threshold = 0.15
+	}
+	if d.CooldownBars <= 0 {
+		d.CooldownBars = 96
 	}
 }
 
@@ -539,7 +712,7 @@ func (br *BacktestRunner) wireStrategyLayer() {
 		maFast:                   24,
 		maSlow:                   96,
 		useForceMom:              br.config.DebugFallbackForce,
-		fallbackScale:            nonZeroOrFloat(br.config.FallbackScale, 1.0),
+		fallbackScale:            nonZeroOrFloat(br.config.Strategy.Fallback.Scale, 1.0),
 		fallbackMomentumLookback: 48,
 		fallbackMomentumThresh:   0.0015,
 		minFallbackHoldBars:      6,
@@ -554,14 +727,14 @@ func (br *BacktestRunner) wireStrategyLayer() {
 		overlayMeanRevGain:       1.25,
 		overlayEntryThreshold:    0.0008,
 		overlayStopDrawdown:      0.08,
-		overlayTargetVol:         nonZeroOrFloat(br.config.StrategyRiskTarget, 1.0),
+		overlayTargetVol:         nonZeroOrFloat(br.config.Risk.RiskTarget, 1.0),
 		overlayVolFloor:          0.35,
 		overlayMomShort:          32,
 		overlayMomLong:           96,
 		overlayMeanRevWindow:     96,
 		overlayATRPeriod:         48,
 		overlayHistLimit:         2500,
-		maxAbsTarget:             nonZeroOrFloat(br.config.StrategyMaxAbsPosition, 1.0),
+		maxAbsTarget:             nonZeroOrFloat(br.config.Risk.MaxAbsPosition, 1.0),
 		barMinutes:               br.barMinutes,
 		signalLogger:             strategy.DefaultSignalLogger(),
 	}
@@ -591,19 +764,19 @@ func buildStrategyEngine(cfg BacktestConfig, tfMin int) *strategy.QuantMasterEli
 	return strategy.NewQuantMasterElite(strategy.EliteParams{
 		TimeframeMinutes: tfMin,
 		TrendWindows:     []int{6, 12, 24, 48},
-		TrendGain:        nonZeroOrFloat(cfg.StrategyTrendGain, 3.0),
+		TrendGain:        nonZeroOrFloat(cfg.Strategy.TrendGain, 3.0),
 		MRWindows:        []int{10, 20},
-		MRGain:           nonZeroOrFloat(cfg.StrategyMRGain, 0.30),
+		MRGain:           nonZeroOrFloat(cfg.Strategy.MRGain, 0.30),
 		BreakoutLookback: 20,
-		BRGain:           nonZeroOrFloat(cfg.StrategyBreakoutGain, 1.0),
+		BRGain:           nonZeroOrFloat(cfg.Strategy.BreakoutGain, 1.0),
 
 		VolWindow:          120,
-		TargetVolAnnual:    nonZeroOrFloat(cfg.StrategyRiskTarget, 1.0),
+		TargetVolAnnual:    nonZeroOrFloat(cfg.Risk.RiskTarget, 1.0),
 		VolTargetSmoothing: 0.08,
 		MinSigmaAnnual:     0.06,
 
-		MaxAbsPosition:   nonZeroOrFloat(cfg.StrategyMaxAbsPosition, 2.0),
-		MaxLeverage:      nonZeroOrFloat(cfg.StrategyMaxLeverage, 3.0),
+		MaxAbsPosition:   nonZeroOrFloat(cfg.Risk.MaxAbsPosition, 2.0),
+		MaxLeverage:      nonZeroOrFloat(cfg.Risk.MaxLeverage, 3.0),
 		EntryThreshold:   0.004,
 		ExitThreshold:    0.002,
 		MinPositionDelta: 0.004,
@@ -662,7 +835,7 @@ func buildBacktestEngine(cfg BacktestConfig, tfMin int) *backtest.Engine {
 		MakerFeeBps:      0.0,
 		SlippageBps:      0.0,
 		MinRebalanceStep: 0.0,
-		MaxAbsPosition:   nonZeroOrFloat(cfg.StrategyMaxAbsPosition, 1.0),
+		MaxAbsPosition:   nonZeroOrFloat(cfg.Risk.MaxAbsPosition, 1.0),
 		AfterFill: func(inst, side string, delta float64, ref float64) (float64, float64) {
 			log.Printf("FILL %-4s %-16s turnover=%.4f @ref=%.2f", strings.ToUpper(side), inst, delta, ref)
 			return 0, 0
@@ -953,25 +1126,54 @@ func loadConfig(path string) (BacktestConfig, error) {
 	var cfg BacktestConfig
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		cfg = BacktestConfig{
-			StartDate:              "2024-01-01",
-			EndDate:                "2024-12-01",
-			InitialCash:            10000,
-			Instruments:            []string{"BTC-USDT-SWAP"},
-			Timeframe:              "15m",
-			DataSource:             "api",
-			DataPath:               "./data/candles",
-			AutoFetchIfMissing:     true,
-			UsePortfolio:           false,
-			BarsLimit:              2000,
-			StrategyRiskTarget:     1.2,
-			StrategyMaxAbsPosition: 2.5,
-			StrategyMaxLeverage:    4.0,
-			StrategyTrendGain:      3.8,
-			StrategyMRGain:         0.45,
-			StrategyBreakoutGain:   1.4,
-			FallbackScale:          1.8,
-			DebugFallbackMA:        true,
-			DebugFallbackForce:     false,
+			StartDate:          "2024-01-01",
+			EndDate:            "2024-12-01",
+			InitialCash:        10000,
+			Instruments:        []string{"BTC-USDT-SWAP"},
+			Timeframe:          "15m",
+			DataSource:         "api",
+			DataPath:           "./data/candles",
+			AutoFetchIfMissing: true,
+			UseRisk:            true,
+			UsePortfolio:       false,
+			BarsLimit:          2000,
+			Strategy: StrategyConfig{
+				TrendGain:    1.8,
+				MRGain:       0.8,
+				BreakoutGain: 1.0,
+				Regime: RegimeConfig{
+					Enable:         boolPtr(true),
+					TrendAdxPeriod: 14,
+					TrendAdxTh:     22,
+					RangeBwPeriod:  20,
+					RangeBwTh:      0.06,
+				},
+				MTF: MTFConfig{
+					ConfirmEnable: boolPtr(true),
+					HigherTF:      "1h",
+					TrendAlign:    boolPtr(true),
+				},
+				Fallback: FallbackConfig{
+					Enable:   boolPtr(true),
+					Scale:    0.2,
+					MAPeriod: 120,
+				},
+			},
+			Risk: RiskConfig{
+				RiskTarget:     0.55,
+				ATRPeriod:      14,
+				ATRStopK:       2.5,
+				ATRTrailK:      3.0,
+				MaxLeverage:    2.0,
+				MaxAbsPosition: 1.5,
+				DDCircuit: DDCircuitConfig{
+					Enable:       boolPtr(true),
+					Threshold:    0.15,
+					CooldownBars: 96,
+				},
+			},
+			DebugFallbackMA:    true,
+			DebugFallbackForce: false,
 		}
 		cfg.normalize()
 		_ = saveJSON(path, cfg)
@@ -1068,6 +1270,8 @@ func clamp(x, lo, hi float64) float64 {
 	}
 	return x
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func smaLast(a []float64, n int) float64 {
 	if n <= 0 || len(a) < n {

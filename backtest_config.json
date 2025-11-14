@@ -9,16 +9,44 @@
   "data_source": "csv",
   "data_path": "./data/candles",
   "auto_fetch_if_missing": true,
-  "use_risk": false,
+  "use_risk": true,
   "use_portfolio": false,
   "bars_limit": 2000,
-  "strategy_risk_target": 1.2,
-  "strategy_max_abs_position": 2.5,
-  "strategy_max_leverage": 4.0,
-  "strategy_trend_gain": 3.8,
-  "strategy_mr_gain": 0.45,
-  "strategy_breakout_gain": 1.4,
-  "fallback_scale": 0.45,
+  "strategy": {
+    "trend_gain": 1.8,
+    "mr_gain": 0.8,
+    "breakout_gain": 1.0,
+    "regime": {
+      "enable": true,
+      "trend_adx_period": 14,
+      "trend_adx_th": 22,
+      "range_bw_period": 20,
+      "range_bw_th": 0.06
+    },
+    "mtf": {
+      "confirm_enable": true,
+      "higher_tf": "1h",
+      "trend_align": true
+    },
+    "fallback": {
+      "enable": true,
+      "scale": 0.2,
+      "ma_period": 120
+    }
+  },
+  "risk": {
+    "risk_target": 0.55,
+    "atr_period": 14,
+    "atr_stop_k": 2.5,
+    "atr_trail_k": 3.0,
+    "max_leverage": 2.0,
+    "max_abs_position": 1.5,
+    "dd_circuit": {
+      "enable": true,
+      "threshold": 0.15,
+      "cooldown_bars": 96
+    }
+  },
   "debug_fallback_ma": true,
   "debug_fallback_force": false
 }
