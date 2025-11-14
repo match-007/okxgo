@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strings"
 )
 
 // ===================== 杞婚噺鍏叡绫诲瀷锛堥伩鍏嶅惊鐜緷璧栵級 =====================
@@ -127,14 +128,18 @@ func (c *Config) withDefaults() Config {
 // 鍗曠瑪浜ゆ槗锛堝紑鈫掑钩锛夎锟?
 
 type Trade struct {
-	InstID     string
-	Dir        string // long/short
-	EntryTime  int64
-	EntryPrice float64
-	ExitTime   int64
-	ExitPrice  float64
-	Size       float64 // 鎸佷粨鐩稿瑙勬ā锛堢粷瀵瑰€硷紝0..1锟?
-	Return     float64 // 瀵瑰簲鏈熼棿鐨勫鏁版敹鐩婅础鐚紙绾︼級
+	InstID      string
+	Dir         string // long/short
+	EntryTime   int64
+	EntryPrice  float64
+	ExitTime    int64
+	ExitPrice   float64
+	Size        float64 // 鎸佷粨鐩稿瑙勬ā锛堢粷瀵瑰€硷紝0..1锟?
+	Return      float64 // 瀵瑰簲鏈熼棿鐨勫鏁版敹鐩婅础鐚紙绾︼級
+	SubStrategy string  `json:"sub_strategy,omitempty"`
+	StopType    string  `json:"stop_type,omitempty"`
+	ATROnEntry  float64 `json:"atr_on_entry,omitempty"`
+	Regime      string  `json:"regime,omitempty"`
 }
 
 // 锟?bar 璁板綍锛堝彲閫夊鍑虹粯鍥撅級
@@ -208,11 +213,14 @@ type instState struct {
 	entryTs       int64
 	holding       int
 	pendingTarget *pending
+	entryMeta     map[string]any
 }
 
 type pending struct {
 	target  float64
 	applyAt int64
+	reason  string
+	meta    map[string]any
 }
 
 // Run 鈥旓拷?鎵ц鏁存鍥炴祴
@@ -281,6 +289,7 @@ func (e *Engine) Run(series Series) Result {
 
 		// 2.3) 缁勫悎鑱氬悎锛堣嫢锟?Portfolio锛夛紝鍚﹀垯鐩存帴鎶婄瓥鐣ヤ俊鍙疯浆涓虹洰锟?
 		targets := map[string]float64{}
+		metaByInst := map[string]map[string]any{}
 		if e.portfolio != nil {
 			// mark 浼犲綋鍓嶆敹鐩橈紙鎴栧彲鐢ㄤ腑浠凤級
 			mark := map[string]float64{}
@@ -300,6 +309,9 @@ func (e *Engine) Run(series Series) Result {
 					v = 0
 				}
 				want[s.InstID] = clamp(v, -e.cfg.MaxAbsPosition, e.cfg.MaxAbsPosition)
+				if s.Meta != nil {
+					metaByInst[s.InstID] = s.Meta
+				}
 			}
 			e.portfolio.SetStrategyTargets(e.strategy.Name(), want)
 			agg, _ := e.portfolio.Propose(mark)
@@ -318,6 +330,9 @@ func (e *Engine) Run(series Series) Result {
 					v = 0
 				}
 				targets[s.InstID] = clamp(v, -e.cfg.MaxAbsPosition, e.cfg.MaxAbsPosition)
+				if s.Meta != nil {
+					metaByInst[s.InstID] = s.Meta
+				}
 			}
 		}
 
@@ -347,12 +362,26 @@ func (e *Engine) Run(series Series) Result {
 			// 椋庢帶鍔ㄤ綔浼樺厛锛坰top/halt 锟?鐩存帴娓呴浂锟?
 			for _, a := range acts {
 				if a.Type == "close" || a.Type == "halt" {
-					ss.pendingTarget = &pending{target: 0, applyAt: decideApplyTs(ts, e.cfg.TradeOnNextBar, e.cfg.BarMinutes)}
+					ss.pendingTarget = &pending{
+						target:  0,
+						applyAt: decideApplyTs(ts, e.cfg.TradeOnNextBar, e.cfg.BarMinutes),
+						reason:  defaultReason(a.Reason, "risk"),
+						meta:    ss.entryMeta,
+					}
 				}
 			}
 			// 姝ｅ父璋冧粨瀹夋帓
 			if ss.pendingTarget == nil {
-				ss.pendingTarget = &pending{target: approved, applyAt: decideApplyTs(ts, e.cfg.TradeOnNextBar, e.cfg.BarMinutes)}
+				meta := metaByInst[inst]
+				if meta == nil {
+					meta = ss.entryMeta
+				}
+				ss.pendingTarget = &pending{
+					target:  approved,
+					applyAt: decideApplyTs(ts, e.cfg.TradeOnNextBar, e.cfg.BarMinutes),
+					reason:  "strategy",
+					meta:    meta,
+				}
 			}
 		}
 
@@ -437,6 +466,8 @@ func (e *Engine) applyFill(states map[string]*instState, inst string, target flo
 	if math.Abs(target-cur) < 1e-9 {
 		return
 	}
+	reason := defaultReason(s.pendingTarget.reason, "strategy")
+	meta := s.pendingTarget.meta
 	fee := e.cfg.TakerFeeBps
 	if e.cfg.UseMaker {
 		fee = e.cfg.MakerFeeBps
@@ -461,27 +492,38 @@ func (e *Engine) applyFill(states map[string]*instState, inst string, target flo
 
 	if closing {
 		ret := sign(cur) * math.Log(refPx/(s.entryPx+1e-12)) * math.Abs(cur)
+		entryMeta := s.entryMeta
+		sub := metaString(entryMeta, "sub_strategy", "unknown")
+		regime := metaString(entryMeta, "regime", "")
+		atrEntry := metaFloat(entryMeta, "atr")
 		*trades = append(*trades, Trade{
-			InstID:     inst,
-			Dir:        dirName(cur),
-			EntryTime:  s.entryTs,
-			EntryPrice: s.entryPx,
-			ExitTime:   ts,
-			ExitPrice:  refPx,
-			Size:       math.Abs(cur),
-			Return:     ret,
+			InstID:      inst,
+			Dir:         dirName(cur),
+			EntryTime:   s.entryTs,
+			EntryPrice:  s.entryPx,
+			ExitTime:    ts,
+			ExitPrice:   refPx,
+			Size:        math.Abs(cur),
+			Return:      ret,
+			SubStrategy: sub,
+			StopType:    reason,
+			ATROnEntry:  atrEntry,
+			Regime:      regime,
 		})
 
 		if target != 0 {
 			s.entryPx = refPx
 			s.entryTs = ts
+			s.entryMeta = meta
 		} else {
 			s.entryPx = 0
 			s.entryTs = 0
+			s.entryMeta = nil
 		}
 	} else if opening {
 		s.entryPx = refPx
 		s.entryTs = ts
+		s.entryMeta = meta
 	}
 
 	if e.after != nil {
@@ -623,4 +665,46 @@ func decideApplyTs(ts int64, next bool, barMin int) int64 {
 		return nextBarTs(ts, barMin)
 	}
 	return ts
+}
+
+func defaultReason(reason, fallback string) string {
+	if strings.TrimSpace(reason) == "" {
+		return fallback
+	}
+	return reason
+}
+
+func metaString(meta map[string]any, key, def string) string {
+	if meta == nil {
+		return def
+	}
+	if v, ok := meta[key]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return def
+}
+
+func metaFloat(meta map[string]any, key string) float64 {
+	if meta == nil {
+		return 0
+	}
+	v, ok := meta[key]
+	if !ok {
+		return 0
+	}
+	switch val := v.(type) {
+	case float64:
+		return val
+	case float32:
+		return float64(val)
+	case int:
+		return float64(val)
+	case int64:
+		return float64(val)
+	case uint64:
+		return float64(val)
+	}
+	return 0
 }

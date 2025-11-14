@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +46,9 @@ type BacktestConfig struct {
 	StrategyBreakoutGain   float64 `json:"strategy_breakout_gain,omitempty"`
 	FallbackScale          float64 `json:"fallback_scale,omitempty"`
 
-	Strategy StrategyConfig `json:"strategy"`
-	Risk     RiskConfig     `json:"risk"`
+	Strategy     StrategyConfig     `json:"strategy"`
+	Risk         RiskConfig         `json:"risk"`
+	Optimization OptimizationConfig `json:"optimization"`
 
 	DebugFallbackMA    bool `json:"debug_fallback_ma"`
 	DebugFallbackForce bool `json:"debug_fallback_force"`
@@ -97,6 +100,12 @@ type DDCircuitConfig struct {
 	CooldownBars int     `json:"cooldown_bars"`
 }
 
+type OptimizationConfig struct {
+	Enable     *bool `json:"enable"`
+	MaxSamples int   `json:"max_samples"`
+	Seed       int64 `json:"seed"`
+}
+
 func (c *BacktestConfig) normalize() {
 	if c.BarsLimit == 0 {
 		c.BarsLimit = 2000
@@ -125,6 +134,7 @@ func (c *BacktestConfig) normalize() {
 
 	c.Strategy.applyDefaults(c)
 	c.Risk.applyDefaults(c)
+	c.Optimization.applyDefaults()
 }
 
 func (s *StrategyConfig) applyDefaults(cfg *BacktestConfig) {
@@ -246,6 +256,18 @@ func (d *DDCircuitConfig) applyDefaults() {
 	}
 }
 
+func (o *OptimizationConfig) applyDefaults() {
+	if o.Enable == nil {
+		o.Enable = boolPtr(true)
+	}
+	if o.MaxSamples <= 0 {
+		o.MaxSamples = defaultGridSampleSize
+	}
+	if o.Seed == 0 {
+		o.Seed = 42
+	}
+}
+
 // ==================== Portfolio Adapter ====================
 
 type PortfolioAdapter struct{ portfolio *portfolio.Engine }
@@ -270,11 +292,33 @@ func (pa *PortfolioAdapter) OnCandle(c backtest.Candle) {
 // ==================== Runner ====================
 
 type BacktestRunner struct {
-	config     BacktestConfig
-	strategy   *strategy.QuantMasterElite
-	portfolio  *portfolio.Engine
-	backtest   *backtest.Engine
-	barMinutes int
+	config       BacktestConfig
+	strategy     *strategy.QuantMasterElite
+	portfolio    *portfolio.Engine
+	backtest     *backtest.Engine
+	barMinutes   int
+	stratAdapter *StrategyAdapter
+	riskAdapter  *RiskAdapter
+}
+
+type RunAnalytics struct {
+	Attribution map[string]AttributionStats `json:"strategy_attribution"`
+	Strategy    StrategySummary             `json:"strategy_summary"`
+	Risk        RiskSummary                 `json:"risk_summary"`
+	VolTarget   VolTargetStats              `json:"vol_target"`
+}
+
+type AttributionStats struct {
+	Trades      int     `json:"trades"`
+	WinRate     float64 `json:"win_rate"`
+	AvgWin      float64 `json:"avg_win"`
+	AvgLoss     float64 `json:"avg_loss"`
+	TotalReturn float64 `json:"total_return"`
+}
+
+type VolTargetStats struct {
+	Target float64 `json:"target"`
+	Actual float64 `json:"actual"`
 }
 
 func NewBacktestRunner(configPath string) (*BacktestRunner, error) {
@@ -314,8 +358,20 @@ func (br *BacktestRunner) Run() error {
 	br.wirePortfolioLayer()
 
 	result := br.backtest.Run(series)
-	printResults(result)
-	saveAll(result)
+	analytics := br.buildAnalytics(result)
+	printResults(result, analytics)
+	saveAll(result, analytics)
+	leaderboard, report := br.runGridSearch(series, result)
+	if len(leaderboard) > 0 {
+		if err := saveLeaderboard("./backtest_results/leaderboard.csv", leaderboard); err != nil {
+			log.Printf("failed to save leaderboard: %v", err)
+		}
+		if strings.TrimSpace(report) != "" {
+			if err := saveReport("./backtest_results/report.md", report); err != nil {
+				log.Printf("failed to save report: %v", err)
+			}
+		}
+	}
 
 	log.Printf("Finished in %v", time.Since(start))
 	return nil
@@ -324,6 +380,7 @@ func (br *BacktestRunner) Run() error {
 // wireStrategyLayer connects the strategy implementation to the backtest engine.
 func (br *BacktestRunner) wireStrategyLayer() {
 	sa := NewStrategyAdapter(br.config.Strategy, br.config.Risk, br.barMinutes)
+	br.stratAdapter = sa
 	br.backtest.SetStrategy(sa)
 }
 
@@ -332,6 +389,7 @@ func (br *BacktestRunner) wireRiskLayer() {
 		return
 	}
 	ra := NewRiskAdapter(br.config.Risk, br.barMinutes)
+	br.riskAdapter = ra
 	br.backtest.SetRisk(ra)
 }
 
@@ -342,6 +400,209 @@ func (br *BacktestRunner) wirePortfolioLayer() {
 	}
 	pa := &PortfolioAdapter{portfolio: br.portfolio}
 	br.backtest.SetPortfolio(pa)
+}
+
+func (br *BacktestRunner) buildAnalytics(res backtest.Result) RunAnalytics {
+	analytics := RunAnalytics{
+		Attribution: summarizeAttribution(res.Trades),
+		VolTarget:   calcVolStats(res.EquityCurve, br.barMinutes, br.config.Risk.RiskTarget),
+	}
+	if br.stratAdapter != nil {
+		analytics.Strategy = br.stratAdapter.Summary()
+	}
+	if br.riskAdapter != nil {
+		analytics.Risk = br.riskAdapter.Summary()
+	}
+	return analytics
+}
+
+const defaultGridSampleSize = 60
+
+type paramSet struct {
+	TrendGain    float64
+	MRGain       float64
+	BreakoutGain float64
+	RiskTarget   float64
+	ATRStop      float64
+	ATRTrail     float64
+	RegimeMul    float64
+}
+
+type gridEntry struct {
+	TrendGain    float64
+	MRGain       float64
+	BreakoutGain float64
+	RiskTarget   float64
+	ATRStop      float64
+	ATRTrail     float64
+	RegimeMul    float64
+	CAGR         float64
+	MaxDD        float64
+	Sharpe       float64
+	Calmar       float64
+	FinalEquity  float64
+}
+
+func (br *BacktestRunner) runGridSearch(series backtest.Series, baseline backtest.Result) ([]gridEntry, string) {
+	if !boolValue(br.config.Optimization.Enable, true) {
+		return nil, ""
+	}
+	sets := generateParamSets()
+	if len(sets) == 0 {
+		return nil, ""
+	}
+	rng := rand.New(rand.NewSource(br.config.Optimization.Seed))
+	rng.Shuffle(len(sets), func(i, j int) {
+		sets[i], sets[j] = sets[j], sets[i]
+	})
+	sample := len(sets)
+	if br.config.Optimization.MaxSamples > 0 && br.config.Optimization.MaxSamples < sample {
+		sample = br.config.Optimization.MaxSamples
+	}
+	entries := make([]gridEntry, 0, sample)
+	bestCalmar := math.Inf(-1)
+	var bestEntry gridEntry
+	var bestResult backtest.Result
+	for i := 0; i < sample; i++ {
+		params := sets[i]
+		cfg := br.config
+		cfg.Strategy.TrendGain = params.TrendGain
+		cfg.Strategy.MRGain = params.MRGain
+		cfg.Strategy.BreakoutGain = params.BreakoutGain
+		cfg.Risk.RiskTarget = params.RiskTarget
+		cfg.Risk.ATRStopK = params.ATRStop
+		cfg.Risk.ATRTrailK = params.ATRTrail
+		cfg.Strategy.Regime.TrendAdxTh = br.config.Strategy.Regime.TrendAdxTh * params.RegimeMul
+		cfg.Strategy.Regime.RangeBwTh = br.config.Strategy.Regime.RangeBwTh * params.RegimeMul
+		cfg.normalize()
+		engine := buildBacktestEngine(cfg, br.barMinutes)
+		sa := NewStrategyAdapter(cfg.Strategy, cfg.Risk, br.barMinutes)
+		engine.SetStrategy(sa)
+		if cfg.UseRisk {
+			ra := NewRiskAdapter(cfg.Risk, br.barMinutes)
+			engine.SetRisk(ra)
+		}
+		res := engine.Run(series)
+		entry := gridEntry{
+			TrendGain:    params.TrendGain,
+			MRGain:       params.MRGain,
+			BreakoutGain: params.BreakoutGain,
+			RiskTarget:   params.RiskTarget,
+			ATRStop:      params.ATRStop,
+			ATRTrail:     params.ATRTrail,
+			RegimeMul:    params.RegimeMul,
+			CAGR:         res.CAGR,
+			MaxDD:        res.MaxDD,
+			Sharpe:       res.Sharpe,
+			Calmar:       calcCalmar(res.CAGR, res.MaxDD),
+			FinalEquity:  res.FinalEquity,
+		}
+		entries = append(entries, entry)
+		if entry.Calmar > bestCalmar {
+			bestCalmar = entry.Calmar
+			bestEntry = entry
+			bestResult = res
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Calmar == entries[j].Calmar {
+			return entries[i].Sharpe > entries[j].Sharpe
+		}
+		return entries[i].Calmar > entries[j].Calmar
+	})
+	report := br.composeReport(baseline, bestResult, bestEntry, sample, len(sets))
+	return entries, report
+}
+
+func generateParamSets() []paramSet {
+	trend := []float64{1.2, 1.5, 1.8, 2.0}
+	mr := []float64{0.5, 0.7, 1.0}
+	breakout := []float64{0.8, 1.0, 1.2}
+	riskTargets := []float64{0.45, 0.55, 0.65}
+	atrStops := []float64{2.0, 2.5, 3.0}
+	atrTrails := []float64{2.5, 3.0, 3.5}
+	regimeMul := []float64{0.9, 1.0, 1.1}
+	var sets []paramSet
+	for _, tg := range trend {
+		for _, mg := range mr {
+			for _, bg := range breakout {
+				for _, rt := range riskTargets {
+					for _, stop := range atrStops {
+						for _, trail := range atrTrails {
+							for _, mul := range regimeMul {
+								sets = append(sets, paramSet{
+									TrendGain:    tg,
+									MRGain:       mg,
+									BreakoutGain: bg,
+									RiskTarget:   rt,
+									ATRStop:      stop,
+									ATRTrail:     trail,
+									RegimeMul:    mul,
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return sets
+}
+
+func calcCalmar(cagr, maxDD float64) float64 {
+	denom := math.Max(maxDD, 1e-6)
+	return cagr / denom
+}
+
+func (br *BacktestRunner) composeReport(baseline backtest.Result, bestResult backtest.Result, best gridEntry, sampled, total int) string {
+	if sampled == 0 {
+		return ""
+	}
+	ddImprovement := 0.0
+	if baseline.MaxDD > 0 {
+		ddImprovement = (baseline.MaxDD - bestResult.MaxDD) / baseline.MaxDD
+	}
+	return fmt.Sprintf(`# Backtest Optimization Report
+
+Tested %d of %d parameter combinations (randomized grid).
+
+## Baseline
+- Final equity: %.2f
+- CAGR: %.2f%%
+- Sharpe: %.2f
+- Max DD: %.2f%%
+- Calmar: %.2f
+
+## Best Candidate
+- Params: trend=%.2f, mr=%.2f, breakout=%.2f, risk_target=%.2f, atr_stop=%.2f, atr_trail=%.2f, regime_mul=%.2f
+- Final equity: %.2f
+- CAGR: %.2f%%
+- Sharpe: %.2f
+- Max DD: %.2f%%
+- Calmar: %.2f
+- Max DD improvement vs baseline: %.2f%%
+`,
+		sampled,
+		total,
+		baseline.FinalEquity,
+		baseline.CAGR*100,
+		baseline.Sharpe,
+		baseline.MaxDD*100,
+		calcCalmar(baseline.CAGR, baseline.MaxDD),
+		best.TrendGain,
+		best.MRGain,
+		best.BreakoutGain,
+		best.RiskTarget,
+		best.ATRStop,
+		best.ATRTrail,
+		best.RegimeMul,
+		bestResult.FinalEquity,
+		bestResult.CAGR*100,
+		bestResult.Sharpe,
+		bestResult.MaxDD*100,
+		best.Calmar,
+		ddImprovement*100,
+	)
 }
 
 // normalizeTimeframe parses timeframe string to minutes, default 15m.
@@ -589,7 +850,7 @@ func loadFromCSV(path, instID string) ([]backtest.Candle, error) {
 
 // ==================== Reporting ====================
 
-func printResults(r backtest.Result) {
+func printResults(r backtest.Result, analytics RunAnalytics) {
 	log.Printf("\n============================================================")
 	log.Printf("Backtest Summary")
 	log.Printf("============================================================")
@@ -600,6 +861,20 @@ func printResults(r backtest.Result) {
 	log.Printf("Max Drawdown        : %.2f%%", r.MaxDD*100)
 	log.Printf("Win Rate            : %.2f%%", r.WinRate*100)
 	log.Printf("Number of Trades    : %d", r.NumTrades)
+	log.Printf("Actual Volatility   : %.2f%% (target %.2f%%)", analytics.VolTarget.Actual*100, analytics.VolTarget.Target*100)
+	hitRate := 0.0
+	if analytics.Strategy.MTFChecks > 0 {
+		hitRate = float64(analytics.Strategy.MTFAligned) / float64(analytics.Strategy.MTFChecks)
+	}
+	log.Printf("MTF Hit Rate        : %.2f%% (%d/%d)", hitRate*100, analytics.Strategy.MTFAligned, analytics.Strategy.MTFChecks)
+	log.Printf("Fallback Usage      : %d", analytics.Strategy.FallbackUsage)
+	log.Printf("Stop Counts         : %+v", analytics.Risk.StopCounts)
+	log.Printf("DD Circuit Windows  : %d", len(analytics.Risk.DDWindows))
+	log.Printf("Strategy Attribution:")
+	for _, key := range orderedAttributionKeys(analytics.Attribution) {
+		stats := analytics.Attribution[key]
+		log.Printf("  - %-10s trades=%3d win_rate=%.2f%% total=%.2f%%", key, stats.Trades, stats.WinRate*100, stats.TotalReturn*100)
+	}
 	log.Printf("------------------------------------------------------------")
 	log.Printf("Trades Detail")
 	log.Printf("------------------------------------------------------------")
@@ -607,16 +882,21 @@ func printResults(r backtest.Result) {
 	log.Printf("============================================================\n")
 }
 
-func saveAll(r backtest.Result) {
+func saveAll(r backtest.Result, analytics RunAnalytics) {
 	_ = os.MkdirAll("./backtest_results", 0o755)
 	_ = saveJSON("./backtest_results/stats.json", map[string]any{
-		"final_equity": r.FinalEquity,
-		"total_return": r.TotalRet,
-		"cagr":         r.CAGR,
-		"sharpe":       r.Sharpe,
-		"max_dd":       r.MaxDD,
-		"win_rate":     r.WinRate,
-		"num_trades":   r.NumTrades,
+		"final_equity":         r.FinalEquity,
+		"total_return":         r.TotalRet,
+		"cagr":                 r.CAGR,
+		"sharpe":               r.Sharpe,
+		"max_dd":               r.MaxDD,
+		"win_rate":             r.WinRate,
+		"num_trades":           r.NumTrades,
+		"actual_vol":           analytics.VolTarget.Actual,
+		"vol_target":           analytics.VolTarget.Target,
+		"strategy_attribution": analytics.Attribution,
+		"strategy_summary":     analytics.Strategy,
+		"risk_summary":         analytics.Risk,
 	})
 	_ = saveEquityCurve("./backtest_results/equity_curve.csv", r.EquityCurve)
 	_ = saveJSON("./backtest_results/trades.json", r.Trades)
@@ -651,7 +931,7 @@ func saveTradeDetails(path string, trades []backtest.Trade) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"idx", "instrument", "dir", "entry_ts", "entry_utc", "entry_price", "exit_ts", "exit_utc", "exit_price", "size", "return_pct", "holding_minutes"})
+	_ = w.Write([]string{"idx", "instrument", "dir", "entry_ts", "entry_utc", "entry_price", "exit_ts", "exit_utc", "exit_price", "size", "return_pct", "holding_minutes", "sub_strategy", "regime", "stop_type", "atr_on_entry"})
 	for i, tr := range trades {
 		ret := computeTradeReturn(tr) * 100
 		holdMinutes := ""
@@ -671,9 +951,90 @@ func saveTradeDetails(path string, trades []backtest.Trade) error {
 			fmt.Sprintf("%.6f", tr.Size),
 			fmt.Sprintf("%.4f", ret),
 			holdMinutes,
+			tr.SubStrategy,
+			tr.Regime,
+			tr.StopType,
+			fmt.Sprintf("%.6f", tr.ATROnEntry),
 		})
 	}
 	return nil
+}
+
+func orderedAttributionKeys(m map[string]AttributionStats) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	base := []string{"trend", "mr", "breakout", "fallback"}
+	seen := make(map[string]bool, len(base))
+	var keys []string
+	for _, k := range base {
+		if _, ok := m[k]; ok {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	var rest []string
+	for k := range m {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	if len(rest) > 0 {
+		sort.Strings(rest)
+		keys = append(keys, rest...)
+	}
+	return keys
+}
+
+func saveLeaderboard(path string, entries []gridEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+	head := []string{"rank", "trend_gain", "mr_gain", "breakout_gain", "risk_target", "atr_stop_k", "atr_trail_k", "regime_multiplier", "cagr", "max_dd", "sharpe", "calmar", "final_equity"}
+	if err := w.Write(head); err != nil {
+		return err
+	}
+	for i, e := range entries {
+		rec := []string{
+			strconv.Itoa(i + 1),
+			fmt.Sprintf("%.2f", e.TrendGain),
+			fmt.Sprintf("%.2f", e.MRGain),
+			fmt.Sprintf("%.2f", e.BreakoutGain),
+			fmt.Sprintf("%.2f", e.RiskTarget),
+			fmt.Sprintf("%.2f", e.ATRStop),
+			fmt.Sprintf("%.2f", e.ATRTrail),
+			fmt.Sprintf("%.2f", e.RegimeMul),
+			fmt.Sprintf("%.4f", e.CAGR),
+			fmt.Sprintf("%.4f", e.MaxDD),
+			fmt.Sprintf("%.4f", e.Sharpe),
+			fmt.Sprintf("%.4f", e.Calmar),
+			fmt.Sprintf("%.4f", e.FinalEquity),
+		}
+		if err := w.Write(rec); err != nil {
+			return err
+		}
+	}
+	return w.Error()
+}
+
+func saveReport(path, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(body), 0o644)
 }
 
 func logTrades(trades []backtest.Trade) {
@@ -694,6 +1055,87 @@ func logTrades(trades []backtest.Trade) {
 			ret,
 		)
 	}
+}
+
+type attrAccumulator struct {
+	trades    int
+	wins      int
+	winSum    float64
+	lossSum   float64
+	lossCount int
+	total     float64
+}
+
+func summarizeAttribution(trades []backtest.Trade) map[string]AttributionStats {
+	acc := map[string]*attrAccumulator{}
+	for _, key := range []string{"trend", "mr", "breakout", "fallback"} {
+		acc[key] = &attrAccumulator{}
+	}
+	for _, tr := range trades {
+		key := strings.TrimSpace(tr.SubStrategy)
+		if key == "" {
+			key = "unknown"
+		}
+		bucket, ok := acc[key]
+		if !ok {
+			bucket = &attrAccumulator{}
+			acc[key] = bucket
+		}
+		bucket.trades++
+		bucket.total += tr.Return
+		if tr.Return > 0 {
+			bucket.wins++
+			bucket.winSum += tr.Return
+		} else if tr.Return < 0 {
+			bucket.lossCount++
+			bucket.lossSum += tr.Return
+		}
+	}
+	stats := make(map[string]AttributionStats, len(acc))
+	for key, bucket := range acc {
+		out := AttributionStats{Trades: bucket.trades, TotalReturn: bucket.total}
+		if bucket.trades > 0 {
+			out.WinRate = float64(bucket.wins) / float64(bucket.trades)
+		}
+		if bucket.wins > 0 {
+			out.AvgWin = bucket.winSum / float64(bucket.wins)
+		}
+		if bucket.lossCount > 0 {
+			out.AvgLoss = bucket.lossSum / float64(bucket.lossCount)
+		}
+		stats[key] = out
+	}
+	return stats
+}
+
+func calcVolStats(curve []backtest.BarRecord, barMinutes int, target float64) VolTargetStats {
+	vs := VolTargetStats{Target: target}
+	if len(curve) == 0 {
+		return vs
+	}
+	vals := make([]float64, len(curve))
+	for i, b := range curve {
+		vals[i] = b.Ret
+	}
+	vs.Actual = annualizeVol(stdDev(vals), barMinutes)
+	return vs
+}
+
+func stdDev(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	mean := 0.0
+	for _, v := range vals {
+		mean += v
+	}
+	mean /= float64(len(vals))
+	varSum := 0.0
+	for _, v := range vals {
+		d := v - mean
+		varSum += d * d
+	}
+	return math.Sqrt(varSum / math.Max(1, float64(len(vals)-1)))
 }
 
 func computeTradeReturn(tr backtest.Trade) float64 {
@@ -765,6 +1207,11 @@ func loadConfig(path string) (BacktestConfig, error) {
 					Threshold:    0.15,
 					CooldownBars: 96,
 				},
+			},
+			Optimization: OptimizationConfig{
+				Enable:     boolPtr(true),
+				MaxSamples: 45,
+				Seed:       42,
 			},
 			DebugFallbackMA:    true,
 			DebugFallbackForce: false,

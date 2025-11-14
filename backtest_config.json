@@ -47,6 +47,11 @@
       "cooldown_bars": 96
     }
   },
+  "optimization": {
+    "enable": true,
+    "max_samples": 45,
+    "seed": 42
+  },
   "debug_fallback_ma": true,
   "debug_fallback_force": false
 }

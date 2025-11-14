@@ -14,6 +14,12 @@ type StrategyAdapter struct {
 	name            string
 
 	states map[string]*strategyState
+
+	mtfChecks    int
+	mtfAligned   int
+	mtfFiltered  int
+	fallbackUse  int
+	regimeCounts map[string]int
 }
 
 func NewStrategyAdapter(cfg StrategyConfig, riskCfg RiskConfig, barMinutes int) *StrategyAdapter {
@@ -28,6 +34,7 @@ func NewStrategyAdapter(cfg StrategyConfig, riskCfg RiskConfig, barMinutes int) 
 		higherTFMinutes: higher,
 		name:            "regime_dynamic_v1",
 		states:          make(map[string]*strategyState),
+		regimeCounts:    make(map[string]int),
 	}
 }
 
@@ -49,15 +56,22 @@ func (sa *StrategyAdapter) OnCandle(c backtest.Candle) []backtest.Signal {
 	weights := sa.computeWeights(regime)
 
 	alignment := sa.multiTimeframeScaler(trendSignal, st)
-	posRaw := weights.trend*trendSignal + weights.mr*mrSignal + weights.breakout*breakoutSignal
-	posRaw *= alignment
+	trendComponent := weights.trend * trendSignal * alignment
+	mrComponent := weights.mr * mrSignal * alignment
+	breakoutComponent := weights.breakout * breakoutSignal * alignment
+	posRaw := trendComponent + mrComponent + breakoutComponent
 
 	strongSignal := regime == "trending" || regime == "ranging"
 	if !boolValue(sa.cfg.Fallback.Enable, true) {
 		strongSignal = true
 	}
+	fallbackComponent := 0.0
 	if sa.shouldUseFallback(posRaw, strongSignal) {
-		posRaw += sa.computeFallbackSignal(st)
+		fallbackComponent = sa.computeFallbackSignal(st)
+		if fallbackComponent != 0 {
+			posRaw += fallbackComponent
+			sa.fallbackUse++
+		}
 	}
 
 	maxAbs := sa.maxAbsPosition()
@@ -74,12 +88,16 @@ func (sa *StrategyAdapter) OnCandle(c backtest.Candle) []backtest.Signal {
 		side, size = "sell", -pos
 	}
 
+	dominant := dominantComponent(trendComponent, mrComponent, breakoutComponent, fallbackComponent)
 	meta := map[string]any{
-		"trend_signal":    trendSignal,
-		"mr_signal":       mrSignal,
-		"breakout_signal": breakoutSignal,
-		"regime":          regime,
-		"mtf_alignment":   alignment,
+		"trend_component":    trendComponent,
+		"mr_component":       mrComponent,
+		"breakout_component": breakoutComponent,
+		"fallback_component": fallbackComponent,
+		"regime":             regime,
+		"mtf_alignment":      alignment,
+		"sub_strategy":       dominant,
+		"atr":                st.atr.Value(),
 	}
 
 	return []backtest.Signal{{
@@ -111,6 +129,7 @@ func (sa *StrategyAdapter) ensureState(inst string) *strategyState {
 		highs:  make([]float64, 0, 1024),
 		lows:   make([]float64, 0, 1024),
 		adx:    newADXTracker(adxPeriod),
+		atr:    newATRTracker(nonZeroOr(sa.riskCfg.ATRPeriod, 14)),
 	}
 	sa.states[inst] = st
 	return st
@@ -163,17 +182,17 @@ func (sa *StrategyAdapter) computeBreakoutSignal(st *strategyState) float64 {
 
 func (sa *StrategyAdapter) detectRegime(st *strategyState) string {
 	if !boolValue(sa.cfg.Regime.Enable, true) {
-		return "neutral"
+		return sa.recordRegime("neutral")
 	}
 	adx := st.adx.Value()
 	if adx >= sa.cfg.Regime.TrendAdxTh {
-		return "trending"
+		return sa.recordRegime("trending")
 	}
 	bw := st.rangeBandwidth(nonZeroOr(sa.cfg.Regime.RangeBwPeriod, 20))
 	if bw > 0 && bw <= sa.cfg.Regime.RangeBwTh {
-		return "ranging"
+		return sa.recordRegime("ranging")
 	}
-	return "neutral"
+	return sa.recordRegime("neutral")
 }
 
 func (sa *StrategyAdapter) computeWeights(regime string) regimeWeights {
@@ -199,6 +218,7 @@ func (sa *StrategyAdapter) multiTimeframeScaler(trendSignal float64, st *strateg
 	if !boolValue(sa.cfg.MTF.ConfirmEnable, true) {
 		return 1.0
 	}
+	sa.mtfChecks++
 	fast := st.mtfFast
 	slow := st.mtfSlow
 	if fast == 0 || slow == 0 {
@@ -210,8 +230,10 @@ func (sa *StrategyAdapter) multiTimeframeScaler(trendSignal float64, st *strateg
 	}
 	if boolValue(sa.cfg.MTF.TrendAlign, true) {
 		if diff*trendSignal < 0 {
+			sa.mtfFiltered++
 			return 0.6
 		}
+		sa.mtfAligned++
 		return 1.25
 	}
 	return 1.0
@@ -256,6 +278,7 @@ type strategyState struct {
 	lows   []float64
 
 	adx *adxTracker
+	atr *atrTracker
 
 	mtfFast   float64
 	mtfSlow   float64
@@ -268,6 +291,9 @@ func (st *strategyState) update(c backtest.Candle, baseTF, higherTF int) {
 	st.lows = appendWithLimit(st.lows, c.L, 3000)
 
 	st.adx.Update(c.H, c.L, c.C)
+	if st.atr != nil {
+		st.atr.Update(c.H, c.L, st.lastClose)
+	}
 
 	ratio := higherTF / maxInts(1, baseTF)
 	fastPeriod := maxInts(4*ratio, 8)
@@ -310,4 +336,47 @@ func emaUpdate(prev, value float64, period int) float64 {
 		return value
 	}
 	return alpha*value + (1-alpha)*prev
+}
+
+func dominantComponent(trend, mr, breakout, fallback float64) string {
+	if fallback != 0 {
+		return "fallback"
+	}
+	maxVal := math.Abs(trend)
+	label := "trend"
+	if math.Abs(mr) > maxVal {
+		maxVal = math.Abs(mr)
+		label = "mr"
+	}
+	if math.Abs(breakout) > maxVal {
+		label = "breakout"
+	}
+	return label
+}
+
+type StrategySummary struct {
+	RegimeCounts  map[string]int `json:"regime_counts"`
+	MTFChecks     int            `json:"mtf_checks"`
+	MTFAligned    int            `json:"mtf_aligned"`
+	MTFFiltered   int            `json:"mtf_filtered"`
+	FallbackUsage int            `json:"fallback_usage"`
+}
+
+func (sa *StrategyAdapter) Summary() StrategySummary {
+	counts := make(map[string]int, len(sa.regimeCounts))
+	for k, v := range sa.regimeCounts {
+		counts[k] = v
+	}
+	return StrategySummary{
+		RegimeCounts:  counts,
+		MTFChecks:     sa.mtfChecks,
+		MTFAligned:    sa.mtfAligned,
+		MTFFiltered:   sa.mtfFiltered,
+		FallbackUsage: sa.fallbackUse,
+	}
+}
+
+func (sa *StrategyAdapter) recordRegime(regime string) string {
+	sa.regimeCounts[regime]++
+	return regime
 }

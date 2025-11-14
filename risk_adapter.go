@@ -16,6 +16,11 @@ type RiskAdapter struct {
 	peakEquity float64
 	ddCooldown int
 	ddScaler   float64
+	stopCounts map[string]int
+	ddActive   bool
+	ddStart    int64
+	ddEvents   []DDWindow
+	lastTs     int64
 }
 
 func NewRiskAdapter(cfg RiskConfig, barMinutes int) *RiskAdapter {
@@ -26,6 +31,7 @@ func NewRiskAdapter(cfg RiskConfig, barMinutes int) *RiskAdapter {
 		equity:     1.0,
 		peakEquity: 1.0,
 		ddScaler:   1.0,
+		stopCounts: make(map[string]int),
 	}
 }
 
@@ -49,7 +55,8 @@ func (ra *RiskAdapter) OnCandle(c backtest.Candle) {
 	if ra.equity > ra.peakEquity {
 		ra.peakEquity = ra.equity
 	}
-	ra.evaluateDrawdown()
+	ra.evaluateDrawdown(c.T)
+	ra.lastTs = c.T
 }
 
 func (ra *RiskAdapter) OnTicker(backtest.Ticker) {}
@@ -123,23 +130,27 @@ func (ra *RiskAdapter) checkStops(inst string, price float64, st *riskState) *ba
 
 	stopDist := stopK * atr
 	if st.position > 0 && price <= st.entryPrice-stopDist {
+		ra.bumpStop("atr_stop")
 		return &backtest.Action{InstID: inst, Type: "close", Reason: "atr_stop", Size: math.Abs(st.position), Price: price}
 	}
 	if st.position < 0 && price >= st.entryPrice+stopDist {
+		ra.bumpStop("atr_stop")
 		return &backtest.Action{InstID: inst, Type: "close", Reason: "atr_stop", Size: math.Abs(st.position), Price: price}
 	}
 
 	trailDist := trailK * atr
 	if st.position > 0 && st.maxFavorable > 0 && price <= st.maxFavorable-trailDist {
+		ra.bumpStop("atr_trail")
 		return &backtest.Action{InstID: inst, Type: "close", Reason: "atr_trail", Size: math.Abs(st.position), Price: price}
 	}
 	if st.position < 0 && st.maxFavorable > 0 && price >= st.maxFavorable+trailDist {
+		ra.bumpStop("atr_trail")
 		return &backtest.Action{InstID: inst, Type: "close", Reason: "atr_trail", Size: math.Abs(st.position), Price: price}
 	}
 	return nil
 }
 
-func (ra *RiskAdapter) evaluateDrawdown() {
+func (ra *RiskAdapter) evaluateDrawdown(ts int64) {
 	if ra.peakEquity <= 0 {
 		ra.peakEquity = 1.0
 	}
@@ -147,12 +158,56 @@ func (ra *RiskAdapter) evaluateDrawdown() {
 	if boolValue(ra.cfg.DDCircuit.Enable, true) && dd >= ra.cfg.DDCircuit.Threshold && ra.ddCooldown == 0 {
 		ra.ddScaler = 0.5
 		ra.ddCooldown = nonZeroOr(ra.cfg.DDCircuit.CooldownBars, 96)
+		ra.ddActive = true
+		ra.ddStart = ts
 	}
 	if ra.ddCooldown > 0 {
 		ra.ddCooldown--
 		if ra.ddCooldown == 0 {
 			ra.ddScaler = 1.0
+			if ra.ddActive {
+				ra.ddEvents = append(ra.ddEvents, DDWindow{Start: ra.ddStart, End: ts})
+				ra.ddActive = false
+			}
 		}
+	}
+}
+
+func (ra *RiskAdapter) bumpStop(reason string) {
+	if reason == "" {
+		reason = "stop"
+	}
+	ra.stopCounts[reason]++
+}
+
+type DDWindow struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
+}
+
+type RiskSummary struct {
+	StopCounts map[string]int `json:"stop_counts"`
+	DDWindows  []DDWindow     `json:"dd_windows"`
+}
+
+func (ra *RiskAdapter) Summary() RiskSummary {
+	if ra.ddActive {
+		end := ra.lastTs
+		if end == 0 && len(ra.ddEvents) > 0 {
+			end = ra.ddEvents[len(ra.ddEvents)-1].End
+		}
+		ra.ddEvents = append(ra.ddEvents, DDWindow{Start: ra.ddStart, End: end})
+		ra.ddActive = false
+	}
+	counts := make(map[string]int, len(ra.stopCounts))
+	for k, v := range ra.stopCounts {
+		counts[k] = v
+	}
+	windows := make([]DDWindow, len(ra.ddEvents))
+	copy(windows, ra.ddEvents)
+	return RiskSummary{
+		StopCounts: counts,
+		DDWindows:  windows,
 	}
 }
 
