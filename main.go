@@ -31,19 +31,70 @@ type BacktestConfig struct {
 	DataSource         string   `json:"data_source"`
 	DataPath           string   `json:"data_path"`
 	AutoFetchIfMissing bool     `json:"auto_fetch_if_missing"`
+	UseRisk            bool     `json:"use_risk"`
 	UsePortfolio       bool     `json:"use_portfolio"`
 	BarsLimit          int      `json:"bars_limit"`
 
-	StrategyRiskTarget     float64 `json:"strategy_risk_target"`
-	StrategyMaxAbsPosition float64 `json:"strategy_max_abs_position"`
-	StrategyMaxLeverage    float64 `json:"strategy_max_leverage"`
-	StrategyTrendGain      float64 `json:"strategy_trend_gain"`
-	StrategyMRGain         float64 `json:"strategy_mr_gain"`
-	StrategyBreakoutGain   float64 `json:"strategy_breakout_gain"`
-	FallbackScale          float64 `json:"fallback_scale"`
+	// Legacy flat strategy fields (kept for backward compatibility)
+	StrategyRiskTarget     float64 `json:"strategy_risk_target,omitempty"`
+	StrategyMaxAbsPosition float64 `json:"strategy_max_abs_position,omitempty"`
+	StrategyMaxLeverage    float64 `json:"strategy_max_leverage,omitempty"`
+	StrategyTrendGain      float64 `json:"strategy_trend_gain,omitempty"`
+	StrategyMRGain         float64 `json:"strategy_mr_gain,omitempty"`
+	StrategyBreakoutGain   float64 `json:"strategy_breakout_gain,omitempty"`
+	FallbackScale          float64 `json:"fallback_scale,omitempty"`
+
+	Strategy StrategyConfig `json:"strategy"`
+	Risk     RiskConfig     `json:"risk"`
 
 	DebugFallbackMA    bool `json:"debug_fallback_ma"`
 	DebugFallbackForce bool `json:"debug_fallback_force"`
+}
+
+// StrategyConfig captures tunable knobs for QuantMasterElite plus new regime controls.
+type StrategyConfig struct {
+	TrendGain    float64        `json:"trend_gain"`
+	MRGain       float64        `json:"mr_gain"`
+	BreakoutGain float64        `json:"breakout_gain"`
+	Regime       RegimeConfig   `json:"regime"`
+	MTF          MTFConfig      `json:"mtf"`
+	Fallback     FallbackConfig `json:"fallback"`
+}
+
+type RegimeConfig struct {
+	Enable         *bool   `json:"enable"`
+	TrendAdxPeriod int     `json:"trend_adx_period"`
+	TrendAdxTh     float64 `json:"trend_adx_th"`
+	RangeBwPeriod  int     `json:"range_bw_period"`
+	RangeBwTh      float64 `json:"range_bw_th"`
+}
+
+type MTFConfig struct {
+	ConfirmEnable *bool  `json:"confirm_enable"`
+	HigherTF      string `json:"higher_tf"`
+	TrendAlign    *bool  `json:"trend_align"`
+}
+
+type FallbackConfig struct {
+	Enable   *bool   `json:"enable"`
+	Scale    float64 `json:"scale"`
+	MAPeriod int     `json:"ma_period"`
+}
+
+type RiskConfig struct {
+	RiskTarget     float64         `json:"risk_target"`
+	ATRPeriod      int             `json:"atr_period"`
+	ATRStopK       float64         `json:"atr_stop_k"`
+	ATRTrailK      float64         `json:"atr_trail_k"`
+	MaxLeverage    float64         `json:"max_leverage"`
+	MaxAbsPosition float64         `json:"max_abs_position"`
+	DDCircuit      DDCircuitConfig `json:"dd_circuit"`
+}
+
+type DDCircuitConfig struct {
+	Enable       *bool   `json:"enable"`
+	Threshold    float64 `json:"threshold"`
+	CooldownBars int     `json:"cooldown_bars"`
 }
 
 func (c *BacktestConfig) normalize() {
@@ -71,389 +122,127 @@ func (c *BacktestConfig) normalize() {
 	if c.FallbackScale <= 0 {
 		c.FallbackScale = 1.0
 	}
+
+	c.Strategy.applyDefaults(c)
+	c.Risk.applyDefaults(c)
 }
 
-// ==================== Strategy Adapter ====================
-
-type StrategyAdapter struct {
-	strategy *strategy.QuantMasterElite
-
-	// Historical close price window for fallbacks
-	hist          map[string][]float64
-	peakPrice     map[string]float64
-	highHist      map[string][]float64
-	lowHist       map[string][]float64
-	returnHist    map[string][]float64
-	overlayATR    map[string]float64
-	useMA         bool
-	maFast        int
-	maSlow        int
-	useForceMom   bool
-	fallbackScale float64 // scale for fallback targets in [-1, 1]
-
-	fallbackMomentumLookback int
-	fallbackMomentumThresh   float64
-	minFallbackHoldBars      int
-	lastFallbackTarget       map[string]float64
-	fallbackHoldBars         map[string]int
-
-	overlayBreakoutLookback int
-	overlayVolLookback      int
-	overlayTrendGain        float64
-	overlayMomentumGain     float64
-	overlayBreakoutGain     float64
-	overlayDeadZone         float64
-	overlayMeanRevGain      float64
-	overlayEntryThreshold   float64
-	overlayStopDrawdown     float64
-	overlayTargetVol        float64
-	overlayVolFloor         float64
-	overlayMomShort         int
-	overlayMomLong          int
-	overlayMeanRevWindow    int
-	overlayATRPeriod        int
-	overlayHistLimit        int
-
-	maxAbsTarget float64
-	barMinutes   int
-
-	signalLogger *strategy.SignalLogger
+func (s *StrategyConfig) applyDefaults(cfg *BacktestConfig) {
+	if s.TrendGain <= 0 {
+		if cfg.StrategyTrendGain > 0 {
+			s.TrendGain = cfg.StrategyTrendGain
+		} else {
+			s.TrendGain = 2.0
+		}
+	}
+	if s.MRGain <= 0 {
+		if cfg.StrategyMRGain > 0 {
+			s.MRGain = cfg.StrategyMRGain
+		} else {
+			s.MRGain = 0.7
+		}
+	}
+	if s.BreakoutGain <= 0 {
+		if cfg.StrategyBreakoutGain > 0 {
+			s.BreakoutGain = cfg.StrategyBreakoutGain
+		} else {
+			s.BreakoutGain = 1.0
+		}
+	}
+	s.Regime.applyDefaults()
+	s.MTF.applyDefaults()
+	s.Fallback.applyDefaults(cfg.FallbackScale)
 }
 
-func (sa *StrategyAdapter) Name() string { return sa.strategy.Name() }
-
-func (sa *StrategyAdapter) OnCandle(c backtest.Candle) []backtest.Signal {
-	raw := sa.strategy.OnCandle(strategy.Candle{
-		InstID: c.InstID, T: c.T, O: c.O, H: c.H, L: c.L, C: c.C, V: c.V,
-	})
-
-	out := make([]backtest.Signal, 0, 2)
-	gotAbs := false
-
-	// 1) Prefer absolute target from strategy meta (Meta.target) or by buy/sell/close
-	for _, s := range raw {
-		sa.logStrategySignal(s)
-		tgt := 0.0
-		if s.Meta != nil {
-			if tv, ok := s.Meta["target"]; ok {
-				switch vv := tv.(type) {
-				case float64:
-					tgt = vv
-				case int:
-					tgt = float64(vv)
-				}
-			}
-		}
-		if tgt == 0 {
-			switch strings.ToLower(strings.TrimSpace(s.Side)) {
-			case "buy":
-				tgt = +s.Size
-			case "sell":
-				tgt = -s.Size
-			case "close":
-				tgt = 0
-			default:
-				continue
-			}
-		}
-		maxAbs := sa.maxAbsTarget
-		if maxAbs <= 0 {
-			maxAbs = 1
-		}
-		tgt = clamp(tgt, -maxAbs, maxAbs)
-
-		side := "close"
-		size := 0.0
-		if tgt > 0 {
-			side, size = "buy", tgt
-		} else if tgt < 0 {
-			side, size = "sell", -tgt
-		}
-		out = append(out, backtest.Signal{
-			InstID: s.InstID, Side: side, Size: size, Price: s.Price, Tag: "abs_target",
-			Meta: s.Meta,
-		})
-		gotAbs = true
-	}
-
-	// 2) Fallbacks if no absolute target was produced
-	if !gotAbs {
-		// 2.1 Keep short history of closes
-		if sa.hist == nil {
-			sa.hist = make(map[string][]float64)
-			sa.peakPrice = make(map[string]float64)
-		}
-		win := append(sa.hist[c.InstID], c.C)
-		limit := sa.overlayHistLimit
-		if limit <= 0 {
-			limit = 2500
-		}
-		if len(win) > limit {
-			win = win[len(win)-limit:]
-		}
-		sa.hist[c.InstID] = win
-
-		if sa.highHist == nil {
-			sa.highHist = make(map[string][]float64)
-			sa.lowHist = make(map[string][]float64)
-			sa.returnHist = make(map[string][]float64)
-			sa.overlayATR = make(map[string]float64)
-		}
-		sa.highHist[c.InstID] = appendWithLimit(sa.highHist[c.InstID], c.H, limit)
-		sa.lowHist[c.InstID] = appendWithLimit(sa.lowHist[c.InstID], c.L, limit)
-		if len(win) >= 2 && win[len(win)-2] > 0 && c.C > 0 {
-			ret := math.Log(c.C / win[len(win)-2])
-			sa.returnHist[c.InstID] = appendWithLimit(sa.returnHist[c.InstID], ret, limit)
-			prevClose := win[len(win)-2]
-			tr := trueRange(c.H, c.L, prevClose)
-			alpha := 2.0 / float64(maxInts(2, sa.overlayATRPeriod)+1)
-			if sa.overlayATR[c.InstID] == 0 {
-				sa.overlayATR[c.InstID] = tr
-			} else {
-				sa.overlayATR[c.InstID] = alpha*tr + (1-alpha)*sa.overlayATR[c.InstID]
-			}
-		}
-
-		// 2.2 Adaptive overlay (trend + momentum + breakout mix)
-		if sa.useMA {
-			if tgt, ok := sa.computeOverlayTarget(c, win); ok {
-				if final, changed := sa.handleFallbackTarget(c.InstID, tgt); changed {
-					side, size := "close", 0.0
-					if final > 0 {
-						side, size = "buy", final
-					} else if final < 0 {
-						side, size = "sell", -final
-					}
-					meta := map[string]any{
-						"target":  final,
-						"fast":    sa.maFast,
-						"slow":    sa.maSlow,
-						"overlay": true,
-					}
-					sa.logAdapterSignal(c.InstID, side, size, c.C, "overlay_alpha", meta)
-					out = append(out, backtest.Signal{
-						InstID: c.InstID, Side: side, Size: size, Price: c.C, Tag: "overlay_alpha",
-						Meta: meta,
-					})
-					gotAbs = true
-				}
-			}
-		}
-
-		// 2.3 Optional pure momentum fallback (kept for debugging parity)
-		if !gotAbs && sa.useForceMom && len(win) > sa.fallbackMomentumLookback {
-			ref := win[len(win)-sa.fallbackMomentumLookback-1]
-			tgt := 0.0
-			if ref > 0 {
-				change := (c.C / ref) - 1
-				switch {
-				case change > sa.fallbackMomentumThresh:
-					tgt = sa.fallbackScale
-				case change < -sa.fallbackMomentumThresh:
-					tgt = -sa.fallbackScale
-				default:
-					tgt = sa.lastFallbackTarget[c.InstID]
-				}
-			}
-			if final, changed := sa.handleFallbackTarget(c.InstID, tgt); changed {
-				side, size := "close", 0.0
-				if final > 0 {
-					side, size = "buy", final
-				} else if final < 0 {
-					side, size = "sell", -final
-				}
-				meta := map[string]any{"target": final}
-				sa.logAdapterSignal(c.InstID, side, size, c.C, "fallback_momentum", meta)
-				out = append(out, backtest.Signal{
-					InstID: c.InstID, Side: side, Size: size, Price: c.C, Tag: "fallback_momentum",
-					Meta: meta,
-				})
-				gotAbs = true
-			}
+func (r *RiskConfig) applyDefaults(cfg *BacktestConfig) {
+	if r.RiskTarget <= 0 {
+		if cfg.StrategyRiskTarget > 0 {
+			r.RiskTarget = cfg.StrategyRiskTarget
+		} else {
+			r.RiskTarget = 0.6
 		}
 	}
-
-	if len(out) == 0 {
-		log.Printf("no signal for %s ts=%d", c.InstID, c.T)
-	} else {
-		log.Printf("emit %s ts=%d signals=%d tag=%s",
-			c.InstID, c.T, len(out), out[0].Tag)
+	if r.ATRPeriod <= 0 {
+		r.ATRPeriod = 14
 	}
-	return out
+	if r.ATRStopK <= 0 {
+		r.ATRStopK = 2.5
+	}
+	if r.ATRTrailK <= 0 {
+		r.ATRTrailK = 3.0
+	}
+	if r.MaxAbsPosition <= 0 {
+		if cfg.StrategyMaxAbsPosition > 0 {
+			r.MaxAbsPosition = cfg.StrategyMaxAbsPosition
+		} else {
+			r.MaxAbsPosition = 1.5
+		}
+	}
+	if r.MaxLeverage <= 0 {
+		if cfg.StrategyMaxLeverage > 0 {
+			r.MaxLeverage = cfg.StrategyMaxLeverage
+		} else {
+			r.MaxLeverage = 2.0
+		}
+	}
+	r.DDCircuit.applyDefaults()
 }
 
-func (sa *StrategyAdapter) OnTicker(t backtest.Ticker) []backtest.Signal {
-	_ = sa.strategy.OnTicker(strategy.Ticker{
-		InstID: t.InstID, Bid: t.Bid, Ask: t.Ask, BidSize: t.BidSize, AskSize: t.AskSize, Last: t.Last,
-	})
-	return nil
-}
-
-func (sa *StrategyAdapter) computeOverlayTarget(c backtest.Candle, win []float64) (float64, bool) {
-	inst := c.InstID
-	if len(win) == 0 {
-		return 0, false
+func (r *RegimeConfig) applyDefaults() {
+	if r.Enable == nil {
+		r.Enable = boolPtr(true)
 	}
-	momShort := nonZeroOr(sa.overlayMomShort, 32)
-	momLong := nonZeroOr(sa.overlayMomLong, 96)
-	req := maxInts(sa.maSlow*2, sa.overlayVolLookback+8, sa.maFast+8, momLong+8)
-	if len(win) < req {
-		return 0, false
+	if r.TrendAdxPeriod <= 0 {
+		r.TrendAdxPeriod = 14
 	}
-
-	hi := sa.highHist[inst]
-	lo := sa.lowHist[inst]
-	rets := sa.returnHist[inst]
-	if len(hi) == 0 || len(lo) == 0 || len(rets) < sa.overlayVolLookback {
-		return 0, false
+	if r.TrendAdxTh <= 0 {
+		r.TrendAdxTh = 20
 	}
-
-	price := win[len(win)-1]
-	fast := emaLast(win, sa.maFast)
-	slow := emaLast(win, sa.maSlow)
-	long := emaLast(win, sa.maSlow*2)
-	if price <= 0 || fast <= 0 || slow <= 0 || long <= 0 {
-		return 0, false
+	if r.RangeBwPeriod <= 0 {
+		r.RangeBwPeriod = 20
 	}
-
-	perBarVol := stdLast(rets, sa.overlayVolLookback)
-	if perBarVol <= 0 {
-		return 0, false
-	}
-
-	// Core signals
-	if len(win) <= momLong {
-		return 0, false
-	}
-
-	breakoutBias := 0.0
-	breakoutLook := maxInts(sa.overlayBreakoutLookback, sa.maSlow)
-	if breakoutLook > len(hi) {
-		breakoutLook = len(hi)
-	}
-	if breakoutLook > 0 {
-		hiRef := maxLast(hi, breakoutLook)
-		loRef := minLast(lo, breakoutLook)
-		if hiRef > 0 && price >= hiRef*(1-sa.overlayEntryThreshold) {
-			breakoutBias = 1
-		} else if loRef > 0 && price <= loRef*(1+sa.overlayEntryThreshold) {
-			breakoutBias = -1
-		}
-	}
-
-	mean := smaLast(win, sa.maSlow)
-	std := stdLast(win, sa.maSlow)
-	meanRev := 0.0
-	if std > 0 {
-		meanRev = (price - mean) / std
-	}
-
-	trendScore := softsign((fast - slow) / slow * sa.overlayTrendGain)
-	macroScore := softsign((slow - long) / long * (sa.overlayTrendGain * 0.5))
-	momentumShort := (price / win[len(win)-momShort]) - 1
-	momentumLong := (price / win[len(win)-momLong]) - 1
-	momentumScore := softsign(momentumShort*sa.overlayMomentumGain*1.2 + momentumLong*sa.overlayMomentumGain*0.4)
-	breakoutScore := breakoutBias * sa.overlayBreakoutGain
-	meanScore := softsign(meanRev * sa.overlayMeanRevGain)
-
-	raw := trendScore*0.45 + macroScore*0.2 + momentumScore*0.35 + breakoutScore*0.4 - meanScore*0.2
-
-	entryEdge := sa.overlayEntryThreshold
-	if entryEdge <= 0 {
-		entryEdge = 0.08
-	}
-	if math.Abs(raw) < entryEdge {
-		prev := sa.lastFallbackTarget[inst]
-		return prev, false
-	}
-
-	target := math.Tanh(raw) * sa.maxAbsTarget
-
-	peak := sa.peakPrice[inst]
-	if price > peak {
-		peak = price
-	}
-	sa.peakPrice[inst] = peak
-	stopDD := sa.overlayStopDrawdown
-	if stopDD <= 0 {
-		stopDD = 0.08
-	}
-	if peak > 0 {
-		dd := (peak - price) / peak
-		if dd > stopDD {
-			target = 0
-		}
-	}
-
-	// Volatility scaling
-	annVol := annualizeVol(perBarVol, sa.barMinutes)
-	targetVol := sa.overlayTargetVol
-	if targetVol <= 0 {
-		targetVol = 1.0
-	}
-	volFloor := sa.overlayVolFloor
-	if volFloor <= 0 {
-		volFloor = 0.25
-	}
-	annVol = math.Max(annVol, volFloor)
-	volScale := clamp(targetVol/annVol, 0.25, 2.5)
-
-	baseScale := clamp(sa.fallbackScale, 0.2, 1.25)
-	target = clamp(target*baseScale*volScale, -sa.maxAbsTarget, sa.maxAbsTarget)
-
-	prev, seen := sa.lastFallbackTarget[inst]
-	if !seen {
-		return target, true
-	}
-	if math.Abs(target-prev) < sa.overlayDeadZone {
-		return prev, false
-	}
-	return target, true
-}
-
-func (sa *StrategyAdapter) handleFallbackTarget(inst string, proposed float64) (float64, bool) {
-	prev := sa.lastFallbackTarget[inst]
-	hold := sa.fallbackHoldBars[inst]
-	if math.Abs(proposed-prev) < 1e-9 {
-		sa.fallbackHoldBars[inst] = hold + 1
-		return prev, false
-	}
-	if prev != 0 && proposed != prev && hold < sa.minFallbackHoldBars {
-		sa.fallbackHoldBars[inst] = hold + 1
-		return prev, false
-	}
-	sa.lastFallbackTarget[inst] = proposed
-	sa.fallbackHoldBars[inst] = 0
-	return proposed, true
-}
-
-func (sa *StrategyAdapter) logStrategySignal(sig strategy.Signal) {
-	if sa.signalLogger == nil {
-		return
-	}
-	if err := sa.signalLogger.LogSignal(sig); err != nil {
-		log.Printf("signal log error: %v", err)
+	if r.RangeBwTh <= 0 {
+		r.RangeBwTh = 0.05
 	}
 }
 
-func (sa *StrategyAdapter) logAdapterSignal(inst, side string, size, price float64, tag string, meta map[string]any) {
-	if sa.signalLogger == nil {
-		return
+func (m *MTFConfig) applyDefaults() {
+	if m.ConfirmEnable == nil {
+		m.ConfirmEnable = boolPtr(true)
 	}
-	payload := map[string]any{}
-	for k, v := range meta {
-		payload[k] = v
+	if strings.TrimSpace(m.HigherTF) == "" {
+		m.HigherTF = "1h"
 	}
-	sig := strategy.Signal{
-		InstID: inst,
-		Side:   side,
-		Size:   size,
-		Price:  price,
-		Tag:    tag,
-		Meta:   payload,
+	if m.TrendAlign == nil {
+		m.TrendAlign = boolPtr(true)
 	}
-	if err := sa.signalLogger.LogSignal(sig); err != nil {
-		log.Printf("signal log error: %v", err)
+}
+
+func (f *FallbackConfig) applyDefaults(legacyScale float64) {
+	if f.Enable == nil {
+		f.Enable = boolPtr(true)
+	}
+	if f.Scale <= 0 {
+		if legacyScale > 0 {
+			f.Scale = legacyScale
+		} else {
+			f.Scale = 0.25
+		}
+	}
+	if f.MAPeriod <= 0 {
+		f.MAPeriod = 100
+	}
+}
+
+func (d *DDCircuitConfig) applyDefaults() {
+	if d.Enable == nil {
+		d.Enable = boolPtr(true)
+	}
+	if d.Threshold <= 0 {
+		d.Threshold = 0.15
+	}
+	if d.CooldownBars <= 0 {
+		d.CooldownBars = 96
 	}
 }
 
@@ -521,6 +310,7 @@ func (br *BacktestRunner) Run() error {
 	}
 
 	br.wireStrategyLayer()
+	br.wireRiskLayer()
 	br.wirePortfolioLayer()
 
 	result := br.backtest.Run(series)
@@ -533,39 +323,16 @@ func (br *BacktestRunner) Run() error {
 
 // wireStrategyLayer connects the strategy implementation to the backtest engine.
 func (br *BacktestRunner) wireStrategyLayer() {
-	sa := &StrategyAdapter{
-		strategy:                 br.strategy,
-		useMA:                    br.config.DebugFallbackMA,
-		maFast:                   24,
-		maSlow:                   96,
-		useForceMom:              br.config.DebugFallbackForce,
-		fallbackScale:            nonZeroOrFloat(br.config.FallbackScale, 1.0),
-		fallbackMomentumLookback: 48,
-		fallbackMomentumThresh:   0.0015,
-		minFallbackHoldBars:      6,
-		lastFallbackTarget:       make(map[string]float64),
-		fallbackHoldBars:         make(map[string]int),
-		overlayBreakoutLookback:  144,
-		overlayVolLookback:       96,
-		overlayTrendGain:         14.0,
-		overlayMomentumGain:      6.5,
-		overlayBreakoutGain:      0.9,
-		overlayDeadZone:          0.04,
-		overlayMeanRevGain:       1.25,
-		overlayEntryThreshold:    0.0008,
-		overlayStopDrawdown:      0.08,
-		overlayTargetVol:         nonZeroOrFloat(br.config.StrategyRiskTarget, 1.0),
-		overlayVolFloor:          0.35,
-		overlayMomShort:          32,
-		overlayMomLong:           96,
-		overlayMeanRevWindow:     96,
-		overlayATRPeriod:         48,
-		overlayHistLimit:         2500,
-		maxAbsTarget:             nonZeroOrFloat(br.config.StrategyMaxAbsPosition, 1.0),
-		barMinutes:               br.barMinutes,
-		signalLogger:             strategy.DefaultSignalLogger(),
-	}
+	sa := NewStrategyAdapter(br.config.Strategy, br.config.Risk, br.barMinutes)
 	br.backtest.SetStrategy(sa)
+}
+
+func (br *BacktestRunner) wireRiskLayer() {
+	if !br.config.UseRisk {
+		return
+	}
+	ra := NewRiskAdapter(br.config.Risk, br.barMinutes)
+	br.backtest.SetRisk(ra)
 }
 
 // wirePortfolioLayer connects the portfolio engine if enabled.
@@ -591,19 +358,19 @@ func buildStrategyEngine(cfg BacktestConfig, tfMin int) *strategy.QuantMasterEli
 	return strategy.NewQuantMasterElite(strategy.EliteParams{
 		TimeframeMinutes: tfMin,
 		TrendWindows:     []int{6, 12, 24, 48},
-		TrendGain:        nonZeroOrFloat(cfg.StrategyTrendGain, 3.0),
+		TrendGain:        nonZeroOrFloat(cfg.Strategy.TrendGain, 3.0),
 		MRWindows:        []int{10, 20},
-		MRGain:           nonZeroOrFloat(cfg.StrategyMRGain, 0.30),
+		MRGain:           nonZeroOrFloat(cfg.Strategy.MRGain, 0.30),
 		BreakoutLookback: 20,
-		BRGain:           nonZeroOrFloat(cfg.StrategyBreakoutGain, 1.0),
+		BRGain:           nonZeroOrFloat(cfg.Strategy.BreakoutGain, 1.0),
 
 		VolWindow:          120,
-		TargetVolAnnual:    nonZeroOrFloat(cfg.StrategyRiskTarget, 1.0),
+		TargetVolAnnual:    nonZeroOrFloat(cfg.Risk.RiskTarget, 1.0),
 		VolTargetSmoothing: 0.08,
 		MinSigmaAnnual:     0.06,
 
-		MaxAbsPosition:   nonZeroOrFloat(cfg.StrategyMaxAbsPosition, 2.0),
-		MaxLeverage:      nonZeroOrFloat(cfg.StrategyMaxLeverage, 3.0),
+		MaxAbsPosition:   nonZeroOrFloat(cfg.Risk.MaxAbsPosition, 2.0),
+		MaxLeverage:      nonZeroOrFloat(cfg.Risk.MaxLeverage, 3.0),
 		EntryThreshold:   0.004,
 		ExitThreshold:    0.002,
 		MinPositionDelta: 0.004,
@@ -662,7 +429,7 @@ func buildBacktestEngine(cfg BacktestConfig, tfMin int) *backtest.Engine {
 		MakerFeeBps:      0.0,
 		SlippageBps:      0.0,
 		MinRebalanceStep: 0.0,
-		MaxAbsPosition:   nonZeroOrFloat(cfg.StrategyMaxAbsPosition, 1.0),
+		MaxAbsPosition:   nonZeroOrFloat(cfg.Risk.MaxAbsPosition, 1.0),
 		AfterFill: func(inst, side string, delta float64, ref float64) (float64, float64) {
 			log.Printf("FILL %-4s %-16s turnover=%.4f @ref=%.2f", strings.ToUpper(side), inst, delta, ref)
 			return 0, 0
@@ -953,25 +720,54 @@ func loadConfig(path string) (BacktestConfig, error) {
 	var cfg BacktestConfig
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		cfg = BacktestConfig{
-			StartDate:              "2024-01-01",
-			EndDate:                "2024-12-01",
-			InitialCash:            10000,
-			Instruments:            []string{"BTC-USDT-SWAP"},
-			Timeframe:              "15m",
-			DataSource:             "api",
-			DataPath:               "./data/candles",
-			AutoFetchIfMissing:     true,
-			UsePortfolio:           false,
-			BarsLimit:              2000,
-			StrategyRiskTarget:     1.2,
-			StrategyMaxAbsPosition: 2.5,
-			StrategyMaxLeverage:    4.0,
-			StrategyTrendGain:      3.8,
-			StrategyMRGain:         0.45,
-			StrategyBreakoutGain:   1.4,
-			FallbackScale:          1.8,
-			DebugFallbackMA:        true,
-			DebugFallbackForce:     false,
+			StartDate:          "2024-01-01",
+			EndDate:            "2024-12-01",
+			InitialCash:        10000,
+			Instruments:        []string{"BTC-USDT-SWAP"},
+			Timeframe:          "15m",
+			DataSource:         "api",
+			DataPath:           "./data/candles",
+			AutoFetchIfMissing: true,
+			UseRisk:            true,
+			UsePortfolio:       false,
+			BarsLimit:          2000,
+			Strategy: StrategyConfig{
+				TrendGain:    1.8,
+				MRGain:       0.8,
+				BreakoutGain: 1.0,
+				Regime: RegimeConfig{
+					Enable:         boolPtr(true),
+					TrendAdxPeriod: 14,
+					TrendAdxTh:     22,
+					RangeBwPeriod:  20,
+					RangeBwTh:      0.06,
+				},
+				MTF: MTFConfig{
+					ConfirmEnable: boolPtr(true),
+					HigherTF:      "1h",
+					TrendAlign:    boolPtr(true),
+				},
+				Fallback: FallbackConfig{
+					Enable:   boolPtr(true),
+					Scale:    0.2,
+					MAPeriod: 120,
+				},
+			},
+			Risk: RiskConfig{
+				RiskTarget:     0.55,
+				ATRPeriod:      14,
+				ATRStopK:       2.5,
+				ATRTrailK:      3.0,
+				MaxLeverage:    2.0,
+				MaxAbsPosition: 1.5,
+				DDCircuit: DDCircuitConfig{
+					Enable:       boolPtr(true),
+					Threshold:    0.15,
+					CooldownBars: 96,
+				},
+			},
+			DebugFallbackMA:    true,
+			DebugFallbackForce: false,
 		}
 		cfg.normalize()
 		_ = saveJSON(path, cfg)
@@ -1068,6 +864,8 @@ func clamp(x, lo, hi float64) float64 {
 	}
 	return x
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func smaLast(a []float64, n int) float64 {
 	if n <= 0 || len(a) < n {
